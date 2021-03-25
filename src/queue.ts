@@ -37,6 +37,7 @@ export async function connectToQueue(
   const host = options.host || "localhost";
   const port = options.port || 6379;
   const db = options.db ?? 0;
+  const username = options.username || void 0;
   const password = options.password || void 0;
   let tls;
   if (options.acceptUnauthorized) {
@@ -54,6 +55,7 @@ export async function connectToQueue(
     host,
     port,
     db,
+    username,
     password,
     tls
   });
