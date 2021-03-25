@@ -48,11 +48,14 @@ export const localStorage = (vorpal.localStorage as unknown) as WindowLocalStora
 vorpal
   .command("connect <queue>", "Connect to bull queue")
   .option("--prefix <prefix>", "Prefix to use for all queue jobs")
+  .option("-u, --uri <uri>", "Redis uri connection string")
   .option("-h, --host <host>", "Redis host for connection")
   .option("-p, --port <port>", "Redis port for connection")
   .option("-d, --db <db>", "Redis db for connection")
+  .option("--username <username>", "Redis username for connection")
   .option("--password <password>", "Redis password for connection")
   .option("-c, --cert <cert>", "Absolute path to pem certificate if TLS used")
+  .option("--acceptUnauthorized", "Avoid the verification of the server certificate against the list of supplied CAs")
   .action(
     wrapTryCatch(async (params: ConnectParams) => {
       await connectToQueue(params, vorpal);
@@ -108,11 +111,16 @@ vorpal.command("connect-to <name>", "Connect to saved connection").action(
 vorpal.command("stats", "Count of jobs by type").action(
   wrapTryCatch(async () => {
     const queue = await getQueue();
-    const [counts, paused] = await Promise.all([
-      queue.getJobCounts(),
-      queue.getPausedCount()
-    ]);
-    console.table({ ...counts, ...{ paused } });
+    const counts = await queue.getJobCounts(
+      "completed",
+      "failed",
+      "delayed",
+      "repeat",
+      "active",
+      "wait",
+      "paused"
+    );
+    console.table(counts);
   })
 );
 
@@ -199,7 +207,7 @@ vorpal.command("pause", "Pause current queue").action(
   wrapTryCatch(async () => {
     const queue = await getQueue();
     await answer(vorpal, "Pause queue");
-    await queue.pause(false);
+    await queue.pause();
     logGreen(`Queue paused`);
   })
 );
@@ -208,7 +216,7 @@ vorpal.command("resume", "Resume current queue from pause").action(
   wrapTryCatch(async () => {
     const queue = await getQueue();
     await answer(vorpal, "Resume queue");
-    await queue.resume(false);
+    await queue.resume();
     logGreen(`Queue resumed from pause`);
   })
 );
@@ -235,7 +243,9 @@ vorpal
       }
       await answer(vorpal, "Add");
       const jobName: string = options.name || "__default__";
-      const addedJob = await queue.add(jobName, jobData);
+      const addedJob = await queue.add(jobName, jobData, {
+        timestamp: Date.now()
+      });
       logGreen(`Job with name '${jobName}', id '${addedJob.id}' added`);
     })
   );
@@ -285,7 +295,8 @@ vorpal.command("fail <jobId> <reason>", "Move job to failed").action(
     await getQueue();
     const job = await getJob(jobId);
     await answer(vorpal, "Fail");
-    await job.moveToFailed({ message: reason }, true);
+    const err = new Error(reason);
+    await job.moveToFailed(err, "0");
     logGreen(`Job "${jobId}" failed`);
   })
 );
@@ -302,7 +313,7 @@ vorpal.command("complete <jobId> <data>", "Move job to completed e.g. complete 1
         return throwYellow(`Error: Argument <data> is invalid: ${e}`);
       }
       await answer(vorpal, "Complete");
-      await job.moveToCompleted(returnValue, true);
+      await job.moveToCompleted(returnValue, "0");
       logGreen(`Job "${jobId}" completed`);
     })
 );
@@ -338,9 +349,9 @@ vorpal
       }
       await answer(vorpal, "Clean");
       const limit = Number.isInteger(options.limit as number)
-        ? options.limit
-        : void 0;
-      await queue.clean(grace, status, limit);
+        ? (options.limit as number)
+        : 0;
+      await queue.clean(grace, limit, status);
       logGreen(`Jobs cleaned`);
     })
   );
@@ -352,11 +363,11 @@ vorpal
   .action(
     wrapTryCatch(async ({ jobId, options }: LogsParams) => {
       const queue = await getQueue();
-      const { logs, count } = await queue.getJobLogs(
+      const { logs, count } = (await queue.getJobLogs(
         jobId,
         options.start,
         options.end
-      );
+      )) as { logs: string[]; count: number };
       console.log(`Count of job logs: ${count}`);
       if (logs.length) {
         console.log("Logs:");
@@ -385,8 +396,8 @@ vorpal.command("events-on", "Turn on logging of queue events").action(
 
 vorpal.command("events-off", "Turn off logging of queue events").action(
   wrapTryCatch(async function() {
-    const queue = await getQueue();
-    unlistenQueueEvents(queue);
+    await getQueue();
+    unlistenQueueEvents();
     logGreen(`Logging of queue events disabled`);
   })
 );

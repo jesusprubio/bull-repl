@@ -1,5 +1,5 @@
 import { JobAdditional, Answer } from "./types";
-import { Job } from "bull";
+import { Job } from "bullmq";
 import { run } from "node-jq";
 import chalk from "chalk";
 import ms from "ms";
@@ -8,7 +8,7 @@ import Vorpal from "@moleculer/vorpal";
 
 export const LAST_SAVED_CONNECTION_NAME = "_last-active";
 
-export const getJob = async (jobId: string) => {
+export const getJob = async (jobId: string): Promise<Job<unknown, unknown>> => {
   const queue = await getQueue();
   const job = await queue.getJob(jobId);
   if (!job) {
@@ -35,7 +35,7 @@ export const showJobs = async (arr: Array<Job>, query: string) => {
       returnValue: (job as JobAdditional).returnvalue,
       attemptsMade: job.attemptsMade,
       delay: job.delay,
-      progress: job._progress
+      progress: job.progress
     }));
   const filteredData = query ? ((await run(query, {root}, {input: 'json', output: 'json'})) as unknown) : {root};
   logArray((<{root?: unknown}>filteredData)?.root ?? filteredData);

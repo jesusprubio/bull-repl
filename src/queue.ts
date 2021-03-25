@@ -1,27 +1,32 @@
-import Queue, { Queue as TQueue, QueueOptions } from "bull";
+import { Queue, QueueEvents } from "bullmq";
 import { throwYellow, logGreen, LAST_SAVED_CONNECTION_NAME, logBlue, logYellow } from "./utils";
-import { ConnectParams } from "./types";
+import IORedis from "ioredis";
 import fs from "fs";
 import Vorpal from "@moleculer/vorpal";
+import { ConnectParams } from "./types";
 
-let queue: TQueue | void;
-let listenEventsOn = false;
+let queue: Queue | void;
+let queueEvents: QueueEvents | void;
 
 export async function getQueue() {
   if (!queue) {
     return throwYellow("Need connect before");
   }
-  return await queue.isReady();
+  await queue.waitUntilReady();
+  return queue;
 }
 
 export async function setQueue(
   name: string,
-  url: string,
-  options: QueueOptions
+  prefix: string,
+  options: string | IORedis.RedisOptions
 ) {
+  unlistenQueueEvents();
   queue && (await queue.close());
-  queue = Queue(name, url, options);
-  await queue.isReady();
+  const client = new IORedis(options as any);
+  queue = new Queue(name, { connection: client, ...{ prefix } });
+  await queue.waitUntilReady();
+  return queue;
 }
 
 export async function connectToQueue(
@@ -33,21 +38,24 @@ export async function connectToQueue(
   const port = options.port || 6379;
   const db = options.db ?? 0;
   const password = options.password || void 0;
-  const tls = options.cert
-    ? {
-        ca: fs.readFileSync(options.cert),
-        rejectUnauthorized: false
-      }
-    : void 0;
-  await setQueue(name, "", {
-    prefix,
-    redis: {
-      host,
-      port,
-      db,
-      password,
-      tls
-    }
+  let tls;
+  if (options.acceptUnauthorized) {
+    tls = { rejectUnauthorized: false };
+  } else if (options.cert) {
+    tls = {
+      ca: fs.readFileSync(options.cert),
+      rejectUnauthorized: false
+    };
+  } else {
+    tls = void 0;
+  }
+
+  await setQueue(name, prefix, options.uri || {
+    host,
+    port,
+    db,
+    password,
+    tls
   });
   (<WindowLocalStorage["localStorage"]>(<unknown>vorpal.localStorage)).setItem(
     LAST_SAVED_CONNECTION_NAME,
@@ -60,49 +68,41 @@ export async function connectToQueue(
   vorpal.delimiter(`BULL-REPL | ${prefix}.${name}> `).show();
 }
 
-export function listenQueueEvents(queue: TQueue) {
-  if (listenEventsOn) {
+export function listenQueueEvents(queue: Queue) {
+  if (queueEvents) {
     return;
   }
-  queue.on('global:active', (jobId: unknown) => {
-    logBlue(`A job with id ${jobId} has started`);
+  queueEvents = new QueueEvents(queue.name);
+  queueEvents.on('completed', (job) => {
+    logBlue(`A job ${job.jobId} successfully completed with result: ${job.returnvalue}`);
   });
-  queue.on('global:completed', (jobId: unknown, result: unknown) => {
-    logBlue(`A job ${jobId} successfully completed with result: ${result}`);
+  queueEvents.on('delayed', (job) => {
+    logBlue(`A job ${job.jobId} delayed with delay ${job.delay}`);
   });
-  queue.on('global:drained', () => {
+  queueEvents.on('drained', () => {
     logBlue('Queue has processed all the waiting jobs');
   });
-  queue.on('global:failed', (jobId: unknown, err: unknown) => {
-    logYellow(`A job ${jobId} failed with error ${err}`);
+  queueEvents.on('failed', (job) => {
+    logYellow(`A job ${job.jobId} failed with error ${job.failedReason}`);
   });
-  queue.on('global:paused', () => {
-    logBlue('The queue has been paused');
+  queueEvents.on('progress', (job, progress) => {
+    logBlue(`A job ${job.jobId} progress was updated to ${progress}`);
   });
-  queue.on('global:progress', (jobId: unknown, progress: unknown) => {
-    logBlue(`A job ${jobId} progress was updated to ${progress}`);
+  queueEvents.on('removed', (job) => {
+    logBlue(`A job ${job.jobId} was removed`);
   });
-  queue.on('global:resumed', () => {
-    logBlue('The queue has been resumed');
+  queueEvents.on('stalled', (job) => {
+    logYellow(`A job ${job.jobId} has been marked as stalled`);
   });
-  queue.on('global:stalled', (jobId: unknown) => {
-    logYellow(`A job ${jobId} has been marked as stalled`);
+  queueEvents.on('waiting', (job) => {
+    logBlue(`A job ${job.jobId} is waiting to be processed`);
   });
-  queue.on('global:waiting', (jobId: unknown) => {
-    logBlue(`A job ${jobId} is waiting to be processed`);
-  });
-  listenEventsOn = true;
 }
 
-export function unlistenQueueEvents(queue: TQueue) {
-  queue.removeAllListeners('global:active');
-  queue.removeAllListeners('global:completed');
-  queue.removeAllListeners('global:drained');
-  queue.removeAllListeners('global:failed');
-  queue.removeAllListeners('global:paused');
-  queue.removeAllListeners('global:progress');
-  queue.removeAllListeners('global:resumed');
-  queue.removeAllListeners('global:stalled');
-  queue.removeAllListeners('global:waiting');
-  listenEventsOn = false;
+export function unlistenQueueEvents() {
+  if (!queueEvents) {
+    return;
+  }
+  queueEvents.removeAllListeners();
+  queueEvents = void 0;
 }
